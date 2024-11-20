@@ -1,0 +1,9 @@
+openai
+python-dotenv
+requests
+tqdm
+icecream
+scipy
+pandas
+surpyval
+numpy

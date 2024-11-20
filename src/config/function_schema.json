@@ -1,0 +1,41 @@
+{
+  "name": "validate_response",
+  "description": "Validates the response format and content",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "work_order": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["id", "description"]
+      },
+      "assessments": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "assessment_id": { "type": "string" },
+            "asset_client_id": { "type": "string" },
+            "asset_name": { "type": "string" },
+            "component": { "type": "string" },
+            "confidence_score": { "type": "number" },
+            "reasoning": { "type": "string" }
+          },
+          "required": ["assessment_id", "asset_client_id", "asset_name", "component", "confidence_score", "reasoning"]
+        }
+      },
+      "repair_classification": {
+        "type": "object",
+        "properties": {
+          "is_repair": { "type": "boolean" },
+          "reasoning": { "type": "string" }
+        },
+        "required": ["is_repair", "reasoning"]
+      }
+    },
+    "required": ["work_order", "assessments", "repair_classification"]
+  }
+}
