@@ -7,3 +7,7 @@ scipy
 pandas
 surpyval
 numpy
+pyodbc
+aiohttp
+asyncio
+openpyxl

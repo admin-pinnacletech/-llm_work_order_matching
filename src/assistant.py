@@ -743,7 +743,7 @@ async def main():
         work_orders = processed_data['workOrders']
         assessments = processed_data['assessments']
 
-        debug_limit = 5000
+        debug_limit = 500
         #random.seed(42)
         #if debug limit is set, randomly select a subset of work orders
         if debug_limit > 0:
