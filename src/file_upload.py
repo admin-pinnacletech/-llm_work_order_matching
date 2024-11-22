@@ -1,8 +1,8 @@
 import logging
-import newton_api_utils
-from folder_structure_manager import FolderStructureManager
-from newton_data_retrieval import NewtonDataRetriever
-from pre_processing import PreProcessor
+import qc_review.newton_api_utils as newton_api_utils
+from src.folder_structure_manager import FolderStructureManager
+from qc_review.newton_data_retrieval import NewtonDataRetriever
+from llm_work_order_matching.data_processor.services import PreProcessor
 
 from openai import OpenAI
 import json

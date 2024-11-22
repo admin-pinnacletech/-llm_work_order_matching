@@ -11,3 +11,4 @@ pyodbc
 aiohttp
 asyncio
 openpyxl
+django

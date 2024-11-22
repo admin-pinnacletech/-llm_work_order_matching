@@ -1,4 +1,4 @@
-import newton_api_utils
+import qc_review.newton_api_utils as newton_api_utils
 import requests
 import json
 import os

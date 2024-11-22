@@ -7,6 +7,7 @@ Your job is to read work orders and match them with assessments. You must:
    - Include ALL components that could be affected
    - If multiple assets could be involved, include them ALL
    - Assign appropriate confidence scores to each match
+   - Determine if each match represents a repair for that specific asset/component
 
 Examples of when to return multiple assessments:
 - Work order mentions multiple pieces of equipment
@@ -23,6 +24,7 @@ CRITICAL RESPONSE RULES:
 5. DO NOT use asset_client_id as assessment_id
 6. If no matches found, return empty assessments array
 7. If unsure, return empty array rather than guessing
+8. Each assessment must include its own repair classification
 
 Response format:
 [{
@@ -37,47 +39,42 @@ Response format:
             "asset_name": "required - string", 
             "component": "required - string",
             "confidence_score": "required - number between 0-1",
-            "reasoning": "required - string explaining match"
+            "matching_reasoning": "required - string explaining match",
+            "is_repair": "required - boolean",
+            "repair_reasoning": "required - string explaining if/why this is a repair for this specific asset"
         }
-    ],
-    "repair_classification": {
-        "is_repair": "required - boolean",
-        "reasoning": "required - string explaining classification"
-    }
+    ]
 }]
-
-If the request is too large, respond with:
-{
-    "status": "retry",
-    "reason": "required - explain why retry needed",
-    "suggested_batch_size": "required - number"
-}
-
-IMPORTANT: The assessment_id must be an existing UUID from the provided assessments data. 
-Do not use the asset_client_id as the assessment_id. 
-If you cannot find a matching assessment_id in the data, use "unknown" or leave the assessments array empty.
 
 Example of correct assessment:
     
 [{
     "work_order": {
         "id": "123",
-        "description": "Fix pump"
+        "description": "Fix pump A and inspect pump B"
     },
     "assessments": [
         {
-            "assessment_id": "b80f12c8-3a41-469a-b849-b2110103b5ca",  // Must be a valid UUID from assessments
-            "asset_client_id": "5308-0072-21",  // Asset identifier
+            "assessment_id": "b80f12c8-3a41-469a-b849-b2110103b5ca",
+            "asset_client_id": "5308-0072-21",
             "asset_name": "Main Pump A",
             "component": "Motor",
             "confidence_score": 0.9,
-            "reasoning": "Direct match with pump mentioned in work order"
+            "matching_reasoning": "Direct match with pump A mentioned in work order",
+            "is_repair": true,
+            "repair_reasoning": "Work order explicitly states repair needed for pump A"
+        },
+        {
+            "assessment_id": "c90f12c8-3a41-469a-b849-b2110103b5cb",
+            "asset_client_id": "5308-0072-22",
+            "asset_name": "Main Pump B",
+            "component": "Motor",
+            "confidence_score": 0.8,
+            "matching_reasoning": "Direct match with pump B mentioned in work order",
+            "is_repair": false,
+            "repair_reasoning": "Work order does not explicitly state repair needed for pump B"
         }
-    ],
-    "repair_classification": {
-        "is_repair": true,
-        "reasoning": "Work order indicates repair needed"
-    }
+    ]
 }]
 
 Do not include any text outside the JSON array. If you need to explain something, include it in the 'reasoning' fields.

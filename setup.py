@@ -1,0 +1,29 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="work_order_review",
+    version="0.1",
+    packages=find_packages(),
+    install_requires=[
+        'django>=4.2.0',
+        'streamlit>=1.29.0',
+        'openai>=1.3.5',
+        'python-dotenv>=1.0.0',
+        'aiohttp>=3.9.0',
+        'requests>=2.31.0',
+        'asyncio>=3.4.3',
+        'backoff>=2.2.1',
+        'tenacity>=8.2.3',
+        'pyodbc>=5.0.1',
+        'asgiref>=3.7.2',
+        'pandas>=2.1.0',
+        'numpy>=1.26.0',
+        'scipy>=1.11.0',
+        'surpyval>=0.6.1',
+        'openpyxl>=3.1.0',
+        'tqdm>=4.66.0',
+        'icecream>=2.1.3',
+        'django-environ>=0.11.0',
+    ],
+    python_requires='>=3.9',
+) 

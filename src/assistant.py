@@ -1,7 +1,7 @@
-import newton_api_utils
-from folder_structure_manager import FolderStructureManager
-from newton_data_retrieval import NewtonDataRetriever
-from pre_processing import PreProcessor
+import qc_review.newton_api_utils as newton_api_utils
+from src.folder_structure_manager import FolderStructureManager
+from qc_review.newton_data_retrieval import NewtonDataRetriever
+from llm_work_order_matching.data_processor.services import PreProcessor
 
 from openai import OpenAI
 import json
@@ -13,7 +13,7 @@ import asyncio
 from typing import List, Dict, Any
 import shutil
 from config import assistant_config
-from validation.response_validator import ResponseValidator
+from src.response_validator import ResponseValidator
 from conversation_logger import ConversationLogger
 from tqdm import tqdm
 import random
@@ -32,21 +32,66 @@ console_handler.setFormatter(log_format)
 logger.addHandler(console_handler)
 
 class WorkOrderMatcher:
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini", newton_path: Dict = None, filepaths: Dict = None):
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
         self.client = OpenAI()
         self.model = model
-        self.newton_path = newton_path
-        self.filepaths = filepaths
-        self.assessments = []  # Will be populated in process_batch
-        self.validator = None  # Will be initialized in process_batch
         self.assistant = self._create_assistant()
-        self.conversation_logger = ConversationLogger(filepaths['algorithm_outputs'])
         
-        # Add a timestamp for the results file name
+        # Add a timestamp for the batch
         self.timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.results_file = os.path.join(filepaths['algorithm_outputs'], f"results_{self.timestamp}.json")
+    
+    async def process_batch(self, work_orders: List[Dict]) -> List[Dict]:
+        """Process a batch of work orders and return matches."""
+        all_results = []
         
-        logger.info(f"Initialized WorkOrderMatcher with model: {model}")
+        for work_order in tqdm(work_orders, desc="Processing Work Orders"):
+            try:
+                # Create thread and process work order
+                thread = self.client.beta.threads.create()
+                
+                # Add the work order to the thread
+                message = self.client.beta.threads.messages.create(
+                    thread_id=thread.id,
+                    role="user",
+                    content=json.dumps({"work_order": work_order})
+                )
+                
+                # Run the assistant
+                run = self.client.beta.threads.runs.create(
+                    thread_id=thread.id,
+                    assistant_id=self.assistant.id
+                )
+                
+                # Wait for completion
+                while True:
+                    run_status = self.client.beta.threads.runs.retrieve(
+                        thread_id=thread.id,
+                        run_id=run.id
+                    )
+                    
+                    if run_status.status == 'completed':
+                        # Get the results
+                        messages = self.client.beta.threads.messages.list(
+                            thread_id=thread.id
+                        )
+                        
+                        # Process the response
+                        result = self._process_response(messages.data[0], work_order)
+                        if result:
+                            all_results.append(result)
+                        break
+                    
+                    elif run_status.status == 'failed':
+                        print(f"Run failed for work order {work_order.get('id')}")
+                        break
+                    
+                    await asyncio.sleep(1)
+                
+            except Exception as e:
+                print(f"Error processing work order {work_order.get('id')}: {str(e)}")
+                continue
+        
+        return all_results
 
     def _get_vector_store_id(self) -> str:
         """Get the vector store ID for the current tenant."""
@@ -95,242 +140,6 @@ class WorkOrderMatcher:
         except Exception as e:
             logger.error(f"Error creating/updating assistant: {str(e)}")
             raise
-
-    async def process_batch(self, work_orders: List[Dict], assessments: List[Dict]) -> List[Dict]:
-        self.assessments = assessments
-        self.validator = ResponseValidator(assessments)
-        all_results = []
-        total = len(work_orders)
-        
-        # Create progress bar
-        progress_bar = tqdm(
-            total=total,
-            desc="Processing Work Orders",
-            unit="WO",
-            position=0,
-            leave=True,
-            ncols=100,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
-        )
-        
-        for i, work_order in enumerate(work_orders):
-            wo_id = work_order.get('id', 'unknown')
-            progress_bar.set_description(f"WO {wo_id}")
-            
-            try:
-                # Create thread and initial message
-                thread = self.client.beta.threads.create()
-                message = self.client.beta.threads.messages.create(
-                    thread_id=thread.id,
-                    role="user",
-                    content=json.dumps({"work_order": work_order, "assessments": self.assessments})
-                )
-                
-                # Log request details
-                self._log_request_details(work_order)
-                
-                # Initial run
-                run = self.client.beta.threads.runs.create(
-                    thread_id=thread.id,
-                    assistant_id=self.assistant.id
-                )
-                
-                # Wait for completion with exponential backoff
-                start_time = time.time()
-                max_retries = 3
-                retry_count = 0
-                base_delay = 5  # Start with 5 seconds
-                
-                while True:
-                    try:
-                        run_status = self.client.beta.threads.runs.retrieve(
-                            thread_id=thread.id,
-                            run_id=run.id
-                        )
-                        
-                        status_msg = f"{run_status.status}"
-                        if retry_count > 0:
-                            status_msg += f" (retry {retry_count}/{max_retries})"
-                        progress_bar.set_postfix_str(status_msg)
-                        
-                        if run_status.status == 'completed':
-                            logger.debug(f"Run completed for WO {wo_id} in {time.time() - start_time:.2f} seconds")
-                            # Optionally, handle the successful run result here
-                            break
-                        elif run_status.status == 'failed':
-                            self._log_run_details(thread.id, run.id, wo_id)
-                            
-                            # Extract error code and message
-                            error_code = getattr(run_status.last_error, 'code', 'unknown_error')
-                            error_message = getattr(run_status.last_error, 'message', 'Unknown error')
-                            
-                            # Define retriable errors
-                            retriable_errors = ['server_error', 'timeout', 'rate_limit_exceeded']
-                            
-                            if error_code in retriable_errors and retry_count < max_retries:
-                                retry_count += 1
-                                delay = base_delay * (2 ** (retry_count - 1)) + random.uniform(0, 1)  # Exponential backoff with jitter
-                                logger.warning(f"Run failed for WO {wo_id}, attempt {retry_count} of {max_retries}. Error: {error_message}")
-                                logger.warning(f"Waiting {delay:.2f}s before retry...")
-                                
-                                progress_bar.set_postfix_str(f"failed (retry {retry_count}/{max_retries}): {error_message[:30]}...")
-                                await asyncio.sleep(delay)
-                                
-                                # Attempt to cancel existing run if possible
-                                try:
-                                    self.client.beta.threads.runs.cancel(
-                                        thread_id=thread.id,
-                                        run_id=run.id
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Error cancelling run: {str(e)}")
-                                
-                                # Create new run with the same message
-                                run = self.client.beta.threads.runs.create(
-                                    thread_id=thread.id,
-                                    assistant_id=self.assistant.id
-                                )
-                                await asyncio.sleep(2)  # Small delay after creating new run
-                                continue
-                            else:
-                                # Non-retriable error or max retries reached
-                                logger.error(f"Run failed for WO {wo_id} after {max_retries} attempts. Last error: {error_message}")
-                                all_results.append(self._create_error_result(work_order, error_message))
-                                progress_bar.set_postfix_str(f"failed: {error_message[:30]}...")
-                                break
-                        
-                        elif run_status.status in ['cancelled', 'expired']:
-                            logger.error(f"Run {run_status.status} for WO {wo_id}")
-                            all_results.append({
-                                "work_order": work_order,
-                                "assessments": [],
-                                "repair_classification": {
-                                    "is_repair": False,
-                                    "reasoning": f"Processing {run_status.status}"
-                                }
-                            })
-                            progress_bar.set_postfix_str(f"failed: {run_status.status}")
-                            break
-                        elif run_status.status == 'requires_action':
-                            # Handle function calls
-                            required_actions = run_status.required_action.submit_tool_outputs.tool_calls
-                            tool_outputs = []
-                            
-                            for action in required_actions:
-                                result = await self._handle_function_call(
-                                    action.function.name,
-                                    json.loads(action.function.arguments)
-                                )
-                                tool_outputs.append({
-                                    "tool_call_id": action.id,
-                                    "output": json.dumps(result)
-                                })
-                            
-                            run = self.client.beta.threads.runs.submit_tool_outputs(
-                                thread_id=thread.id,
-                                run_id=run.id,
-                                tool_outputs=tool_outputs
-                            )
-                            continue
-                        
-                        await asyncio.sleep(1)
-                        
-                    except Exception as e:
-                        logger.error(f"Error checking run status for WO {wo_id}: {str(e)}")
-                        if retry_count < max_retries:
-                            retry_count += 1
-                            delay = base_delay * (2 ** (retry_count - 1)) + random.uniform(0, 1)  # Exponential backoff with jitter
-                            logger.warning(f"Error checking run status for WO {wo_id}, attempt {retry_count} of {max_retries}. Error: {str(e)}")
-                            logger.warning(f"Waiting {delay:.2f}s before retry...")
-                            
-                            progress_bar.set_postfix_str(f"error (retry {retry_count}/{max_retries}): {str(e)[:30]}...")
-                            await asyncio.sleep(delay)
-                            continue
-                        else:
-                            logger.error(f"Error checking run status for WO {wo_id} after {max_retries} attempts. Last error: {str(e)}")
-                            all_results.append(self._create_error_result(work_order, str(e)))
-                            progress_bar.set_postfix_str(f"error: {str(e)[:30]}...")
-                            break
-                
-                # After processing each work order, get the messages and save the result
-                messages = self.client.beta.threads.messages.list(thread_id=thread.id)
-                last_message = messages.data[0]  # Get the most recent message
-                
-                # Extract the result from the assistant's response
-                result = None
-                raw_response = None
-                for content in last_message.content:
-                    if content.type == 'text':
-                        raw_response = content.text.value  # Store the raw response
-                        json_str = self._extract_json_from_response(raw_response, wo_id)
-                        if json_str:
-                            try:
-                                result = json.loads(json_str)
-                                break
-                            except json.JSONDecodeError:
-                                continue
-                
-                if result:
-                    all_results.append(result)
-                    # Save after each work order
-                    self._save_progress(all_results, i + 1, total)
-                else:
-                    try:
-                        # Try one more time with a simpler prompt
-                        retry_prompt = (
-                            "Please reformat your last response as a simple JSON object with "
-                            "work_order, assessments, and repair_classification fields only. "
-                            "Do not include any explanatory text or source citations."
-                        )
-                        messages = self.client.beta.threads.messages.create(
-                            thread_id=thread.id,
-                            role="user",
-                            content=retry_prompt
-                        )
-                        run = self.client.beta.threads.runs.create(
-                            thread_id=thread.id,
-                            assistant_id=self.assistant.id
-                        )
-                        # Wait for completion...
-                        messages = self.client.beta.threads.messages.list(thread_id=thread.id)
-                        last_message = messages.data[0]
-                        
-                        for content in last_message.content:
-                            if content.type == 'text':
-                                json_str = self._extract_json_from_response(content.text.value, wo_id)
-                                if json_str:
-                                    result = json.loads(json_str)
-                                    break
-                    except Exception as retry_error:
-                        logger.error(f"Retry failed for WO {wo_id}: {str(retry_error)}")
-                        error_result = self._create_error_result(
-                            work_order, 
-                            "Failed to parse assistant response",
-                            raw_response  # Include the raw response
-                        )
-                        all_results.append(error_result)
-                        self._save_progress(all_results, i + 1, total)
-                
-                # Update progress
-                progress_bar.update(1)
-                
-            except Exception as e:
-                logger.error(f"Error processing WO {wo_id}: {str(e)}")
-                progress_bar.set_postfix_str(f"error: {str(e)[:30]}...")
-                progress_bar.update(1)
-                error_result = self._create_error_result(
-                    work_order, 
-                    str(e),
-                    raw_response if 'raw_response' in locals() else None
-                )
-                all_results.append(error_result)
-                self._save_progress(all_results, i + 1, total)
-                await asyncio.sleep(5)  # Longer delay after error
-
-        progress_bar.close()
-        # Save final results
-        self._save_progress(all_results, total, total)
-        return all_results
 
     async def _handle_function_call(self, function_name: str, arguments: Dict) -> Any:
         """Handle function calls from the assistant."""
@@ -737,7 +546,7 @@ async def main():
         
         # Pass filepaths to PreProcessor
         pre_processor = PreProcessor(newton_path, raw_data, filepaths)
-        processed_data = pre_processor.pre_process()
+        processed_data = await pre_processor.pre_process()
 
         # Get work orders and assessments
         work_orders = processed_data['workOrders']

@@ -22,20 +22,23 @@
             "asset_name": { "type": "string" },
             "component": { "type": "string" },
             "confidence_score": { "type": "number" },
-            "reasoning": { "type": "string" }
+            "matching_reasoning": { "type": "string" },
+            "is_repair": { "type": "boolean" },
+            "repair_reasoning": { "type": "string" }
           },
-          "required": ["assessment_id", "asset_client_id", "asset_name", "component", "confidence_score", "reasoning"]
+          "required": [
+            "assessment_id", 
+            "asset_client_id", 
+            "asset_name", 
+            "component", 
+            "confidence_score", 
+            "matching_reasoning",
+            "is_repair",
+            "repair_reasoning"
+          ]
         }
-      },
-      "repair_classification": {
-        "type": "object",
-        "properties": {
-          "is_repair": { "type": "boolean" },
-          "reasoning": { "type": "string" }
-        },
-        "required": ["is_repair", "reasoning"]
       }
     },
-    "required": ["work_order", "assessments", "repair_classification"]
+    "required": ["work_order", "assessments"]
   }
 }
