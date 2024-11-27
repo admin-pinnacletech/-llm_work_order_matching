@@ -1,174 +1,110 @@
 import streamlit as st
+from work_order_review.ui.pages.scenario_select_page import render_scenario_select
+from work_order_review.ui.pages.assessment_import_page import render_assessment_import
+from work_order_review.ui.pages.vector_store_update_page import render_vector_store_update
+from work_order_review.ui.pages.scenarios_page import render_scenarios
+from work_order_review.ui.pages.work_order_upload_page import render_work_order_upload
+from work_order_review.ui.pages.work_order_matching_page import render_work_order_matching
+from work_order_review.ui.pages.work_order_review_page import render_work_order_review
 import asyncio
-from datetime import datetime
-from work_order_review.pages.scenario_manager import ScenarioManager
+import logging
 
-def validate_inputs(tenant_identifier: str, scenario_id: str) -> tuple[bool, str]:
-    """Validate input formats before making API calls"""
-    if not tenant_identifier:
-        return False, "Tenant identifier is required"
-    if not tenant_identifier.isalnum():
-        return False, "Tenant identifier must be alphanumeric"
-    
-    if not scenario_id:
-        return False, "Scenario ID is required"
-    try:
-        scenario_int = int(scenario_id)
-        if scenario_int <= 0:
-            return False, "Scenario ID must be a positive number"
-    except ValueError:
-        return False, "Scenario ID must be a number"
-    
-    return True, ""
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Suppress SQLAlchemy logging
+logging.getLogger('sqlalchemy').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.orm').setLevel(logging.WARNING)
 
 async def main():
-    st.title("Newton Data Import")
-    
-    # Initialize scenario manager
-    scenario_manager = ScenarioManager()
-    
-    # Run duplicate cleanup on startup
-    cleanup_count = await scenario_manager.cleanup_duplicates()
-    if cleanup_count > 0:
-        st.toast(f"Cleaned up {cleanup_count} duplicate scenarios")
-    
-    # Create two main sections with tabs
-    tab1, tab2 = st.tabs(["Create New Scenario", "Select Existing"])
-    
-    with tab1:
-        # Clean form with proper spacing and help text
-        with st.form("new_scenario_form", border=True):
-            col1, col2 = st.columns([3, 1])
+    try:
+        st.set_page_config(page_title="Work Order Review", layout="wide")
+        
+        # Add pages to sidebar
+        pages = {
+            'Add Scenario': render_scenarios,
+            "Select Scenario": render_scenario_select,
+            "Import Assessments": render_assessment_import,
+            "Update Vector Store": render_vector_store_update,
+            "Upload Work Orders": render_work_order_upload,
+            "Match Work Orders": render_work_order_matching,
+            "Review Matches": render_work_order_review
+        }
+        
+        # Sidebar navigation
+        st.sidebar.title("Navigation")
+        
+        # Show scenario info if selected
+        if all(key in st.session_state for key in ['tenant_id', 'scenario_id']):
+            st.sidebar.success(f"""
+                **Current Scenario**
+                - Tenant: {st.session_state.get('tenant_name', st.session_state.tenant_id)}
+                - Facility: {st.session_state.get('facility_name', '')}
+                - Scenario: {st.session_state.get('scenario_name', st.session_state.scenario_id)}
+            """)
+        
+        # Always show all pages
+        available_pages = list(pages.keys())
+        
+        # Get current selection
+        current_page = st.session_state.get('current_page', 'Select Scenario')
+        if current_page not in available_pages:
+            current_page = 'Select Scenario'
+            st.session_state.current_page = current_page
             
-            with col1:
-                tenant_identifier = st.text_input(
-                    "Tenant Identifier",
-                    placeholder="Enter tenant ID",
-                    help="The alphanumeric identifier for your tenant"
-                )
-                
-                scenario_id = st.text_input(
-                    "Scenario ID",
-                    placeholder="Enter scenario ID",
-                    help="Numeric ID for the new scenario"
-                )
-            
-            submitted = st.form_submit_button(
-                "Create Scenario", 
-                type="primary",
-                use_container_width=True
-            )
-            
-            if submitted:
-                # Validate inputs
-                is_valid, error_message = validate_inputs(tenant_identifier, scenario_id)
-                
-                if is_valid:
-                    with st.spinner("Creating scenario..."):
-                        try:
-                            # Get scenario data
-                            scenario_data = await scenario_manager.get_scenario_data(tenant_identifier, scenario_id)
-                            
-                            if scenario_data:
-                                st.success("Scenario created successfully!")
-                                # Force refresh of all picklists
-                                st.session_state.refresh_data = True
-                                st.rerun()
-                            else:
-                                st.error("Failed to create scenario. Please check the inputs and try again.")
-                        except Exception as e:
-                            st.error(f"Error creating scenario: {str(e)}")
-                else:
-                    st.error(error_message)
-    
-    with tab2:
-        # Initialize or refresh tenant list
-        if 'tenant_list' not in st.session_state or st.session_state.get('refresh_data'):
-            st.session_state.tenant_list = await scenario_manager.get_tenants()
-            st.session_state.refresh_data = False
+        # Update selection with radio button
+        selection = st.sidebar.radio(
+            "Go to",
+            options=available_pages,
+            index=available_pages.index(current_page)
+        )
         
-        # Create three equal columns for selection
-        col1, col2, col3 = st.columns(3)
+        if selection != current_page:
+            st.session_state.current_page = selection
+            st.rerun()
         
-        with col1:
-            st.write("#### 1. Select Tenant")
-            tenant_names = [t['name'] for t in st.session_state.tenant_list]
-            selected_tenant_name = st.selectbox(
-                "Select Tenant",
-                options=tenant_names if tenant_names else ["No tenants available"],
-                key='selected_tenant_name',
-                label_visibility="collapsed"
-            )
+        logger.info(f"Selected page: {selection}")
         
-        with col2:
-            if selected_tenant_name and selected_tenant_name != "No tenants available":
-                st.write("#### 2. Select Facility")
-                # Get selected tenant ID
-                selected_tenant = next(t for t in st.session_state.tenant_list if t['name'] == selected_tenant_name)
-                
-                # Get facilities for selected tenant
-                if ('facility_list' not in st.session_state or 
-                    st.session_state.get('refresh_data') or 
-                    st.session_state.get('last_tenant_id') != selected_tenant['id']):
-                    st.session_state.facility_list = await scenario_manager.get_facilities(selected_tenant['id'])
-                    st.session_state.last_tenant_id = selected_tenant['id']
-                
-                facility_names = [f['name'] for f in st.session_state.facility_list]
-                selected_facility_name = st.selectbox(
-                    "Select Facility",
-                    options=facility_names if facility_names else ["No facilities available"],
-                    key='selected_facility_name',
-                    label_visibility="collapsed"
-                )
+        # Render selected page
+        await pages[selection]()
         
-        with col3:
-            if selected_facility_name and selected_facility_name != "No facilities available":
-                st.write("#### 3. Select Scenario")
-                # Get selected facility ID
-                selected_facility = next(f for f in st.session_state.facility_list if f['name'] == selected_facility_name)
-                
-                # Get scenarios for selected facility
-                if ('scenario_list' not in st.session_state or 
-                    st.session_state.get('refresh_data') or 
-                    st.session_state.get('last_facility_id') != selected_facility['id']):
-                    st.session_state.scenario_list = await scenario_manager.get_scenarios(
-                        selected_tenant['id'],
-                        selected_facility['id']
+        # Show overlay if no scenario selected and not on scenario pages
+        if not all(key in st.session_state for key in ['tenant_id', 'scenario_id']):
+            if selection not in ['Add Scenario', 'Select Scenario']:
+                with st.container():
+                    st.markdown(
+                        """
+                        <div style='position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
+                                background-color: rgba(0,0,0,0.7); z-index: 1000; 
+                                display: flex; justify-content: center; align-items: center;'>
+                            <div style='background-color: white; padding: 2rem; border-radius: 10px; 
+                                    max-width: 500px; text-align: center;'>
+                                <h2>Please Select a Scenario</h2>
+                                <p>You need to select a scenario before using this page.</p>
+                                <p>Go to <b>Select Scenario</b> in the navigation menu to choose one.</p>
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
                     )
-                    st.session_state.last_facility_id = selected_facility['id']
-                
-                scenario_names = [s['name'] for s in st.session_state.scenario_list]
-                selected_scenario_name = st.selectbox(
-                    "Select Scenario",
-                    options=scenario_names if scenario_names else ["No scenarios available"],
-                    key='selected_scenario_name',
-                    label_visibility="collapsed"
-                )
-    
-        # Only show summary and import button when all selections are made
-        if (selected_tenant_name and selected_facility_name and selected_scenario_name and 
-            all(x != "No scenarios available" for x in [selected_tenant_name, selected_facility_name, selected_scenario_name])):
-            
-            st.divider()
-            
-            # Create columns for summary and action
-            sum_col, btn_col = st.columns([2, 1])
-            
-            with sum_col:
-                st.info(
-                    "**Ready to Import:**\n\n"
-                    f"**Scenario:** {selected_scenario_name}\n"
-                    f"**Facility:** {selected_facility_name}\n"
-                    f"**Tenant:** {selected_tenant_name}"
-                )
-            
-            with btn_col:
-                st.write("")  # Add spacing
-                st.write("")  # Add spacing
-                if st.button("Import Data", type="primary", use_container_width=True):
-                    with st.spinner("Importing scenario data..."):
-                        # Your existing import logic here
-                        pass
+        
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}", exc_info=True)
+        st.error(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
+    finally:
+        loop.close()

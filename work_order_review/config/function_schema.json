@@ -1,0 +1,52 @@
+{
+  "name": "validate_asset_client_ids",
+  "description": "Validates the asset_client_ids exist in the vector store",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "work_order": {
+        "type": "object",
+        "properties": {
+          "id": { 
+            "type": "string",
+            "description": "The ID of the work order"
+          },
+          "summary": { 
+            "type": "string",
+            "description": "A summary of the work order"
+          }
+        },
+        "required": ["id", "summary"]
+      },
+      "matches": {
+        "type": "array",
+        "description": "Match work orders to relevant equipment assessments. Each assessment represents a specific piece of equipment that needs inspection or maintenance. Use the vector store to find relevant assessments based on equipment names, IDs, and descriptions.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "asset_client_id": {
+              "type": "string",
+              "description": "Client ID of the asset. Example: '5323-0220-35' or 'VNA-OXY-5208-450'. Must match an existing asset client ID from the vector store."
+            },
+            "matching_confidence_score": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "How confident the match is (0-1)"
+            },
+            "matching_reasoning": {
+              "type": "string",
+              "description": "Explain why this assessment matches the work order"
+            }
+          },
+          "required": [
+            "asset_client_id",
+            "matching_confidence_score",
+            "matching_reasoning"
+          ]
+        }
+      }
+    },
+    "required": ["work_order", "matches"]
+  }
+}
