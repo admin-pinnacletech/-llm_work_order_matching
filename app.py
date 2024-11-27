@@ -6,6 +6,7 @@ from work_order_review.ui.pages.scenarios_page import render_scenarios
 from work_order_review.ui.pages.work_order_upload_page import render_work_order_upload
 from work_order_review.ui.pages.work_order_matching_page import render_work_order_matching
 from work_order_review.ui.pages.work_order_review_page import render_work_order_review
+from work_order_review.ui.pages.model_metrics_page import render_model_metrics
 import asyncio
 import logging
 
@@ -35,7 +36,8 @@ async def main():
             "Update Vector Store": render_vector_store_update,
             "Upload Work Orders": render_work_order_upload,
             "Match Work Orders": render_work_order_matching,
-            "Review Matches": render_work_order_review
+            "Review Matches": render_work_order_review,
+            "Model Metrics": render_model_metrics
         }
         
         # Sidebar navigation

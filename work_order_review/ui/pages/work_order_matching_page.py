@@ -70,29 +70,32 @@ async def render_work_order_matching():
         
         # Selection controls in a styled container
         with st.container():
+            col1, col2, col3 = st.columns([1, 1, 2])
             
-            col1, col2, col3, col4 = st.columns(4)
             with col1:
+                st.write("")  # Add vertical spacing
                 if st.button("📋 Select All", use_container_width=True):
                     st.session_state.selected_work_orders.update(df['id'].tolist())
                     st.rerun()
 
             with col2:
+                st.write("")  # Add vertical spacing
                 if st.button("🗑️ Clear Selection", use_container_width=True):
                     st.session_state.selected_work_orders.clear()
                     st.rerun()
             
             with col3:
+                st.write("Batch Size")
                 batch_size = st.number_input(
-                    "📦 Batch Size", 
+                    label="Batch Size",
+                    label_visibility="collapsed",  # Hide the label
                     min_value=1, 
                     max_value=len(work_orders),
                     value=min(10, len(work_orders)), 
                     step=1,
                     help="Number of work orders to process at once"
                 )
-            
-            with col4:
+                st.write("")  # Add vertical spacing
                 if st.button("➕ Select Batch", type="primary", use_container_width=True):
                     unselected_ids = [
                         wo.id for wo in work_orders 
@@ -152,9 +155,19 @@ async def render_work_order_matching():
                 # Create a container for progress tracking
                 progress_container = st.empty()
                 with progress_container.container():
+                    st.markdown("### Processing Progress")
                     progress_bar = st.progress(0.0)
                     status_text = st.empty()
-                    time_remaining = st.empty()
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        time_remaining = st.empty()
+                    
+                    with col2:
+                        st.markdown("### Statistics")
+                        processed_count = st.empty()
+                        avg_speed = st.empty()
                     
                     total = len(selected_ids)
                     start_time = datetime.now()
@@ -171,8 +184,8 @@ async def render_work_order_matching():
 
                         def progress_callback(work_order_id: str, current: int):
                             progress = current / total
-                            progress_bar.progress(progress)
-                            status_text.text(f"Processing work order {current}/{total}")
+                            progress_bar.progress(progress, f"Processing {current}/{total}")
+                            status_text.markdown(f"🔄 **Processing work order {current}/{total}**")
                             
                             elapsed_time = (datetime.now() - start_time).total_seconds()
                             if current > 1:
@@ -181,8 +194,12 @@ async def render_work_order_matching():
                                 remaining_seconds = remaining_items * avg_time_per_item
                                 remaining_minutes = int(remaining_seconds // 60)
                                 remaining_seconds = int(remaining_seconds % 60)
-                                time_remaining.text(
-                                    f"Estimated time remaining: {remaining_minutes}m {remaining_seconds}s"
+                                
+                                # Update statistics
+                                processed_count.markdown(f"✅ **Processed:** {current}/{total}")
+                                avg_speed.markdown(f"⚡ **Speed:** {avg_time_per_item:.1f}s/item")
+                                time_remaining.markdown(
+                                    f"⏱️ **Est. remaining:** {remaining_minutes}m {remaining_seconds}s"
                                 )
                         
                         # Create processing results for tracking

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, JSON, ForeignKey, Boolean, DateTime, func, Enum, Float, UniqueConstraint
+from sqlalchemy import Column, String, JSON, ForeignKey, Boolean, DateTime, func, Enum, Float, UniqueConstraint, Integer
 from sqlalchemy.orm import relationship
 from .base import Base
 import enum
@@ -134,4 +134,18 @@ class WorkOrderProcessingResult(Base):
     error = Column(String, nullable=True)
     raw_response = Column(JSON, nullable=True)
     
-    work_order = relationship("WorkOrder") 
+    work_order = relationship("WorkOrder")
+
+class ModelMetrics(Base):
+    __tablename__ = "model_metrics"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    work_order_id = Column(String, ForeignKey("work_orders.id"))
+    suggested_matches_count = Column(Integer, default=0)
+    accepted_matches_count = Column(Integer, default=0)
+    rejected_matches_count = Column(Integer, default=0)
+    confidence_scores = Column(JSON)  # Store array of confidence scores
+    processing_time = Column(Float)  # In seconds
+    created_at = Column(DateTime, server_default=func.now())
+    
+    work_order = relationship("WorkOrder", backref="model_metrics") 

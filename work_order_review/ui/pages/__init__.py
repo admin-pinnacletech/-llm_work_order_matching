@@ -4,12 +4,13 @@ from .vector_store_update_page import render_vector_store_update
 from .scenarios_page import render_scenarios
 from .work_order_upload_page import render_work_order_upload
 from .work_order_matching_page import render_work_order_matching
-
+from .model_metrics_page import render_model_metrics
 __all__ = [
     'render_scenario_select',
     'render_assessment_import',
     'render_vector_store_update',
     'render_scenarios',
     'render_work_order_upload',
-    'render_work_order_matching'
+    'render_work_order_matching',
+    'render_model_metrics'
 ]

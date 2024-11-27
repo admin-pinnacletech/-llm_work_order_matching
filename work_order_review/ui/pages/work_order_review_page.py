@@ -56,6 +56,9 @@ async def render_work_order_review():
             WorkOrder.status == WorkOrderStatus.PENDING_REVIEW.value
         ).options(
             selectinload(WorkOrder.matches)
+        ).order_by(
+            WorkOrder.created_at,
+            WorkOrder.external_id
         )
         
         result = await session.execute(stmt)
@@ -121,22 +124,33 @@ async def render_work_order_review():
                 
                 review_service = MatchReviewService(session)
                 
+                # Initialize match statuses in session state if not present
+                if 'match_statuses' not in st.session_state:
+                    st.session_state.match_statuses = {}
+                
                 # Fetch all assets once to avoid multiple queries
                 assets = await get_assets(session)
                 asset_dict = {asset.client_id: asset.name for asset in assets}
                 
                 for match in matches:
+                    # Generate a unique key that includes the status
+                    container_key = f"match_container_{match.id}_{match.review_status}"
+                    
                     with st.container():
                         # Fetch asset name using asset_client_id
                         asset_name = asset_dict.get(match.asset_client_id, "Unknown Asset")
                         
+                        # Create the colored container with the current status
+                        background_color = (
+                            '#d4edda' if match.review_status == 'ACCEPTED'
+                            else '#f8d7da' if match.review_status == 'REJECTED'
+                            else '#f8f9fa'
+                        )
+                        
                         st.markdown(
                             f"""
-                            <div style="padding: 10px; border-radius: 5px; background-color: {
-                                '#d4edda' if match.review_status == 'ACCEPTED' 
-                                else '#f8d7da' if match.review_status == 'REJECTED'
-                                else '#f8f9fa'
-                            };">
+                            <div style="padding: 10px; border-radius: 5px; background-color: {background_color};"
+                                 key="{container_key}">
                                 <strong>Asset Client ID:</strong> {match.asset_client_id}<br>
                                 <strong>Asset Name:</strong> {asset_name}<br>
                                 <strong>Confidence:</strong> {match.matching_confidence_score:.0%}<br>
@@ -154,15 +168,20 @@ async def render_work_order_review():
                             if st.button("✅ Accept", 
                                        key=f"accept_{match.id}",
                                        disabled=match.review_status == 'ACCEPTED'):
+                                logger.info(f"Accept button clicked for match {match.id}")
                                 try:
                                     async with AsyncSessionLocal() as update_session:
-                                        async with update_session.begin():
-                                            service = MatchReviewService(update_session)
-                                            if await service.update_match_status(match.id, 'ACCEPTED'):
-                                                st.success("Match accepted")
-                                                st.rerun()
-                                            else:
-                                                st.error("Failed to accept match")
+                                        stmt = update(WorkOrderMatch).where(
+                                            WorkOrderMatch.id == match.id
+                                        ).values(
+                                            review_status='ACCEPTED',
+                                            reviewed_at=datetime.utcnow()
+                                        )
+                                        await update_session.execute(stmt)
+                                        await update_session.commit()
+                                        logger.info(f"Successfully updated match {match.id} to ACCEPTED")
+                                        st.success("Match accepted")
+                                        st.rerun()
                                 except Exception as e:
                                     logger.exception("Error accepting match")
                                     st.error(f"Error: {str(e)}")
@@ -171,15 +190,20 @@ async def render_work_order_review():
                             if st.button("🗑️ Reject", 
                                        key=f"reject_{match.id}",
                                        disabled=match.review_status == 'REJECTED'):
+                                logger.info(f"Reject button clicked for match {match.id}")
                                 try:
                                     async with AsyncSessionLocal() as update_session:
-                                        async with update_session.begin():
-                                            service = MatchReviewService(update_session)
-                                            if await service.update_match_status(match.id, 'REJECTED'):
-                                                st.success("Match rejected")
-                                                st.rerun()
-                                            else:
-                                                st.error("Failed to reject match")
+                                        stmt = update(WorkOrderMatch).where(
+                                            WorkOrderMatch.id == match.id
+                                        ).values(
+                                            review_status='REJECTED',
+                                            reviewed_at=datetime.utcnow()
+                                        )
+                                        await update_session.execute(stmt)
+                                        await update_session.commit()
+                                        logger.info(f"Successfully updated match {match.id} to REJECTED")
+                                        st.success("Match rejected")
+                                        st.rerun()
                                 except Exception as e:
                                     logger.exception("Error rejecting match")
                                     st.error(f"Error: {str(e)}")
@@ -188,15 +212,20 @@ async def render_work_order_review():
                             if st.button("🔄 Reset", 
                                        key=f"reset_{match.id}",
                                        disabled=match.review_status == 'PENDING'):
+                                logger.info(f"Reset button clicked for match {match.id}")
                                 try:
                                     async with AsyncSessionLocal() as update_session:
-                                        async with update_session.begin():
-                                            service = MatchReviewService(update_session)
-                                            if await service.update_match_status(match.id, 'PENDING'):
-                                                st.success("Match reset")
-                                                st.rerun()
-                                            else:
-                                                st.error("Failed to reset match")
+                                        stmt = update(WorkOrderMatch).where(
+                                            WorkOrderMatch.id == match.id
+                                        ).values(
+                                            review_status='PENDING',
+                                            reviewed_at=datetime.utcnow()
+                                        )
+                                        await update_session.execute(stmt)
+                                        await update_session.commit()
+                                        logger.info(f"Successfully updated match {match.id} to PENDING")
+                                        st.success("Match reset")
+                                        st.rerun()
                                 except Exception as e:
                                     logger.exception("Error resetting match")
                                     st.error(f"Error: {str(e)}")
@@ -257,56 +286,57 @@ async def render_work_order_review():
                 # Close the form
                 st.session_state[f"show_match_form_{work_order.id}"] = False
             
-            # Review notes and submit button should be outside the matches check
-            st.markdown("### Review Notes")
-            review_notes = st.text_area(
-                "Add any notes about your review decisions...",
-                key=f"notes_{work_order.id}",
-                height=100
+            # Check if all matches have been reviewed (either accepted or rejected)
+            all_matches_reviewed = all(
+                match.review_status in ['ACCEPTED', 'REJECTED'] 
+                for match in matches
             )
-            
-            if st.button("Submit Review", key=f"submit_{work_order.id}", type="primary"):
-                try:
-                    # Collect all match decisions based on their current review status
-                    match_decisions = {
-                        match.id: match.review_status == 'ACCEPTED'
-                        for match in matches
-                    }
-                    
-                    async with AsyncSessionLocal() as review_session:
-                        async with review_session.begin():
-                            # Update matches based on decisions
-                            for match_id, is_accepted in match_decisions.items():
-                                if not is_accepted:
-                                    await review_session.execute(
-                                        text("""
-                                            DELETE FROM work_order_matches 
-                                            WHERE id = :match_id
-                                        """),
-                                        {'match_id': match_id}
-                                    )
-                            
-                            # Update work order status using SQL update
-                            await review_session.execute(
-                                text("""
-                                    UPDATE work_orders 
-                                    SET status = :status,
-                                        review_notes = :notes,
-                                        reviewed_at = CURRENT_TIMESTAMP
-                                    WHERE id = :work_order_id
-                                """),
-                                {
-                                    'status': WorkOrderStatus.REVIEWED.value,
-                                    'notes': review_notes,
-                                    'work_order_id': work_order.id
-                                }
-                            )
-                    
-                    st.success("Review submitted successfully!")
-                    st.rerun()
-                except Exception as e:
-                    logger.exception("Error submitting review")
-                    st.error(f"Error submitting review: {str(e)}")
+
+            # Review notes input
+            review_notes = st.text_area(
+                "Review Notes",
+                key=f"notes_{work_order.id}",
+                placeholder="Add any notes about this review..."
+            )
+
+            # Submit button - disabled if not all matches are reviewed
+            if st.button("Submit Review", 
+                        key=f"submit_{work_order.id}", 
+                        type="primary",
+                        disabled=not all_matches_reviewed):
+                if not all_matches_reviewed:
+                    st.warning("Please review all matches before submitting.")
+                else:
+                    try:
+                        # Collect all match decisions based on their current review status
+                        match_decisions = {
+                            match.id: match.review_status == 'ACCEPTED'
+                            for match in matches
+                        }
+                        
+                        async with AsyncSessionLocal() as review_session:
+                            async with review_session.begin():
+                                review_service = MatchReviewService(review_session)
+                                success = await review_service.submit_review(
+                                    work_order_id=work_order.id,
+                                    match_decisions=match_decisions,
+                                    review_notes=review_notes
+                                )
+                                
+                                if success:
+                                    st.success("Review submitted successfully!")
+                                else:
+                                    st.error("Failed to submit review")
+                        
+                        st.rerun()
+                    except Exception as e:
+                        logger.exception("Error submitting review")
+                        st.error(f"Error submitting review: {str(e)}")
+
+            # Add a message to show how many matches still need review
+            pending_matches = sum(1 for match in matches if match.review_status == 'PENDING')
+            if pending_matches > 0:
+                st.warning(f"⚠️ {pending_matches} match{'es' if pending_matches != 1 else ''} still need{'s' if pending_matches == 1 else ''} to be reviewed")
         
         # Navigation buttons
         col1, col2, col3 = st.columns([1, 2, 1])
