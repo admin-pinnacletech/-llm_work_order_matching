@@ -13,10 +13,34 @@
           },
           "summary": { 
             "type": "string",
-            "description": "A summary of the work order"
+            "description": "A summary of the work order. Should be 1-3 sentences and describe the action that was taken in the work order, focusing on repairs, downtime caused, and costs. The text should be in plain English, a json object."
+          },
+          "downtime_hours": {
+            "type": "number",
+            "description": "The downtime hours of the work order",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "cost": {
+            "type": "number",
+            "description": "The cost of the work order in USD",
+            "minimum": 0,
+            "maximum": 100000000
+          },
+          "corrective_actions": {
+            "type": "array",
+            "description": "The corrective actions taken in the work order",
+            "items": {
+              "type": "string"
+            }
+          },
+          "task_type": {
+            "type": "string",
+            "description": "The type of task that was performed in the work order",
+            "enum": ["Reactive Repair", "Preventative Maintenance", "Inspection", "Planned Repair"]
           }
         },
-        "required": ["id", "summary"]
+        "required": ["id", "summary", "downtime_hours", "cost", "task_type"]
       },
       "matches": {
         "type": "array",

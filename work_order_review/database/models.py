@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, JSON, ForeignKey, Boolean, DateTime, func, Enum, Float, UniqueConstraint, Integer
+from sqlalchemy import Column, String, JSON, ForeignKey, Boolean, DateTime, func, Enum, Float, UniqueConstraint, Integer, Index
 from sqlalchemy.orm import relationship
 from .base import Base
 import enum
@@ -90,12 +90,14 @@ class WorkOrderMatch(Base):
     
     id = Column(String, primary_key=True)
     work_order_id = Column(String, ForeignKey("work_orders.id"))
-    asset_client_id = Column(String, nullable=False)
+    asset_client_id = Column(String, ForeignKey("assets.client_id"))
     matching_confidence_score = Column(Float, nullable=False)
     matching_reasoning = Column(String, nullable=False)
     review_status = Column(String, default='PENDING')
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+    tenant_id = Column(String, nullable=False)
+    facility_scenario_id = Column(String, nullable=False)
     
     work_order = relationship("WorkOrder", back_populates="matches")
 
@@ -118,6 +120,10 @@ class WorkOrder(Base):
     reviewed_by = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
+    llm_summary = Column(String, nullable=True)
+    llm_downtime_hours = Column(Float, nullable=True)
+    llm_cost = Column(Float, nullable=True)
+    task_type = Column(String, nullable=True)
     
     tenant = relationship("Tenant", backref="work_orders")
     facility_scenario = relationship("FacilityScenario", backref="work_orders")
@@ -149,3 +155,17 @@ class ModelMetrics(Base):
     created_at = Column(DateTime, server_default=func.now())
     
     work_order = relationship("WorkOrder", backref="model_metrics") 
+
+class CorrectiveAction(Base):
+    __tablename__ = "corrective_actions"
+    __table_args__ = {'extend_existing': True}
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    action = Column(String)
+    tenant_id = Column(String)
+    facility_scenario_id = Column(String)
+    work_order_id = Column(String, ForeignKey("work_orders.id"))
+    created_at = Column(DateTime, server_default=func.now())
+    review_status = Column(String, default="PENDING")
+    
+    work_order = relationship("WorkOrder", backref="corrective_actions")

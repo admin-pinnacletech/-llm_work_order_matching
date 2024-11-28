@@ -3,9 +3,12 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from work_order_review.database.models import WorkOrderMatch, WorkOrder, WorkOrderStatus
 import logging
-from typing import Dict
+from typing import Dict, List
 from sqlalchemy import select
 from work_order_review.database.models import ModelMetrics
+from sqlalchemy.sql import text
+import uuid
+from work_order_review.database.models import CorrectiveAction
 
 logger = logging.getLogger(__name__)
 
@@ -40,37 +43,83 @@ class MatchReviewService:
         except Exception as e:
             logger.error(f"Error updating model metrics: {str(e)}")
     
-    async def submit_review(self, work_order_id: str, match_decisions: Dict[str, bool], review_notes: str = None) -> bool:
-        """Submit a work order review with match decisions"""
+    async def submit_review(
+        self, 
+        work_order_id: str, 
+        match_decisions: Dict[str, bool], 
+        review_notes: str,
+        summary: str = None,
+        downtime_hours: float = None,
+        cost: float = None,
+        corrective_actions: List[str] = None,
+        tenant_id: str = None,
+        facility_scenario_id: str = None
+    ) -> bool:
+        """Submit a work order review with all associated data."""
         try:
-            # Update match statuses
+            # Update work order status and review details
+            update_stmt = text("""
+                UPDATE work_orders 
+                SET status = :status,
+                    review_notes = :review_notes,
+                    reviewed_at = :reviewed_at,
+                    reviewed_by = :reviewed_by,
+                    llm_summary = :summary,
+                    llm_downtime_hours = :downtime_hours,
+                    llm_cost = :cost
+                WHERE id = :work_order_id
+            """)
+            
+            await self.session.execute(
+                update_stmt,
+                {
+                    'status': WorkOrderStatus.REVIEWED.value,
+                    'review_notes': review_notes,
+                    'reviewed_at': datetime.utcnow(),
+                    'reviewed_by': 'user',  # TODO: Add actual user ID
+                    'work_order_id': work_order_id,
+                    'summary': summary,
+                    'downtime_hours': downtime_hours,
+                    'cost': cost
+                }
+            )
+
+            # Update corrective actions if provided
+            if corrective_actions is not None:
+                # Delete existing corrective actions
+                delete_stmt = text("""
+                    DELETE FROM corrective_actions 
+                    WHERE work_order_id = :work_order_id
+                """)
+                await self.session.execute(delete_stmt, {'work_order_id': work_order_id})
+                
+                # Insert new corrective actions
+                for action in corrective_actions:
+                    new_action = CorrectiveAction(
+                        id=str(uuid.uuid4()),
+                        work_order_id=work_order_id,
+                        action=action,
+                        tenant_id=tenant_id,
+                        facility_scenario_id=facility_scenario_id
+                    )
+                    self.session.add(new_action)
+
+            # Process match decisions
             for match_id, is_accepted in match_decisions.items():
-                status = 'ACCEPTED' if is_accepted else 'REJECTED'
                 stmt = update(WorkOrderMatch).where(
                     WorkOrderMatch.id == match_id
                 ).values(
-                    review_status=status,
+                    review_status='ACCEPTED' if is_accepted else 'REJECTED',
                     reviewed_at=datetime.utcnow()
                 )
                 await self.session.execute(stmt)
             
-            # Update work order status
-            stmt = update(WorkOrder).where(
-                WorkOrder.id == work_order_id
-            ).values(
-                status=WorkOrderStatus.REVIEWED.value,
-                review_notes=review_notes,
-                reviewed_at=datetime.utcnow()
-            )
-            await self.session.execute(stmt)
-            
-            # Update metrics
-            await self._update_model_metrics(work_order_id, match_decisions)
-            
+            await self.session.commit()
             return True
             
         except Exception as e:
-            logger.exception(f"Error submitting review for work order {work_order_id}")
+            logger.exception("Error submitting review")
+            await self.session.rollback()
             return False
     
     async def update_match_status(self, match_id: str, new_status: str) -> bool:

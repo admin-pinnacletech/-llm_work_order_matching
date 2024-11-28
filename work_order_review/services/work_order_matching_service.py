@@ -7,12 +7,14 @@ from openai import OpenAI
 from sqlalchemy import text, select
 import uuid
 import datetime
+from stqdm import stqdm
 from work_order_review.database.models import (
     WorkOrderMatch, 
     WorkOrderStatus, 
     Assessment, 
     Asset, 
     Component,
+    CorrectiveAction,
     WorkOrder
 )
 from work_order_review.config.assistant_config import get_assistant_config
@@ -32,20 +34,21 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 class WorkOrderEventHandler(AssistantEventHandler):
-    def __init__(self, service, thread_id):
+    def __init__(self, service):
         super().__init__()
         self.service = service
-        self.thread_id = thread_id
         self.latest_message = None
         self.error = None
 
     @override
     def on_event(self, event) -> None:
+        logger.info(f"Event: {event}")
         if event.event == 'thread.run.requires_action':
             run_id = event.data.id
-            self.handle_requires_action(event.data, run_id)
+            thread_id = event.data.thread_id  # Get thread ID from the event
+            self.handle_requires_action(event.data, run_id, thread_id)
 
-    def handle_requires_action(self, data, run_id):
+    def handle_requires_action(self, data, run_id, thread_id):
         tool_outputs = []
         
         for tool in data.required_action.submit_tool_outputs.tool_calls:
@@ -72,12 +75,12 @@ class WorkOrderEventHandler(AssistantEventHandler):
                     tool_outputs.append({"tool_call_id": tool.id, "output": str(e)})
         
         if tool_outputs:
-            self.submit_tool_outputs(tool_outputs, run_id)
+            self.submit_tool_outputs(tool_outputs, run_id, thread_id)
 
-    def submit_tool_outputs(self, tool_outputs, run_id):
+    def submit_tool_outputs(self, tool_outputs, run_id, thread_id):
         try:
             self.service.client.beta.threads.runs.submit_tool_outputs(
-                thread_id=self.thread_id,
+                thread_id=thread_id,
                 run_id=run_id,
                 tool_outputs=tool_outputs
             )
@@ -123,7 +126,7 @@ class WorkOrderMatchingService:
         if not self.assistant:
             self.assistant = self._create_assistant()
         self.thread = self.client.beta.threads.create()
-        self.event_handler = WorkOrderEventHandler(service=self, thread_id=self.thread.id)
+        self.event_handler = WorkOrderEventHandler(service=self)
         return self
 
     def _get_vector_store_id(self) -> str:
@@ -204,36 +207,68 @@ class WorkOrderMatchingService:
 
     async def process_work_orders(self, work_orders: List[WorkOrder], progress_callback=None) -> List[Dict]:
         """Process multiple work orders and return results."""
+        logger.info(f"Starting to process {len(work_orders)} work orders")
         results = []
-        for index, work_order in enumerate(work_orders):
-            result = await self.process_work_order(work_order)
-            results.append(result)
-            
-            if progress_callback:
-                progress_callback(work_order.id, index + 1)
         
-        return results
+        async def call_callback(wo_id: str, index: int, status: str):
+            """Helper to handle both sync and async callbacks"""
+            if progress_callback:
+                if asyncio.iscoroutinefunction(progress_callback):
+                    await progress_callback(wo_id, index, status)
+                else:
+                    progress_callback(wo_id, index, status)
+        
+        try:
+            work_orders = list(work_orders)
+            logger.info(f"Processing {len(work_orders)} work orders")
+            
+            for index, work_order in enumerate(work_orders):
+                logger.info(f"Starting work order {index + 1}/{len(work_orders)}: {work_order.id}")
+                try:
+                    result = await self.process_work_order(work_order)
+                    logger.info(f"Got result for {work_order.id}: {result.get('status', 'unknown')}")
+                    results.append(result)
+                    
+                    await call_callback(str(work_order.id), index + 1, result.get('status', 'unknown'))
+                        
+                except Exception as e:
+                    logger.exception(f"Error processing work order {work_order.id}")
+                    error_result = {
+                        'work_order_id': str(work_order.id),
+                        'status': 'error',
+                        'error': str(e)
+                    }
+                    results.append(error_result)
+                    await call_callback(str(work_order.id), index + 1, 'error')
+                    
+            return results
+        except Exception as e:
+            logger.exception("Error in process_work_orders")
+            raise
 
-    async def process_work_order(self, work_order: WorkOrder) -> Dict:
+    async def process_work_order(self, work_order: WorkOrder, attempt: int = 0, max_attempts: int = 3) -> Dict:
         """Process a single work order and return its result."""
         try:
             work_order_id = str(work_order.id)
+            logger.info(f"Starting process_work_order for {work_order_id} (attempt {attempt + 1}/{max_attempts})")
             
-            # Format the message for the assistant
+            # Create message for the work order
             message = {
                 "work_order": {
                     "id": work_order_id,
-                    "summary": work_order.raw_data.get('summary', '')
+                    "summary": json.dumps(work_order.raw_data, indent=4)
                 }
             }
             
-            # Create message in thread
+            # Create new thread for each attempt
+            self.thread = self.client.beta.threads.create()
             self.client.beta.threads.messages.create(
                 thread_id=self.thread.id,
                 role="user",
                 content=json.dumps(message, indent=4)
             )
             
+            logger.info(f"Running assistant for work order {work_order_id}")
             # Run the assistant
             run = self.client.beta.threads.runs.create(
                 thread_id=self.thread.id,
@@ -246,16 +281,32 @@ class WorkOrderMatchingService:
                     thread_id=self.thread.id,
                     run_id=run.id
                 )
+                logger.info(f"Run status for {work_order_id}: {run.status}")
+                
                 if run.status == 'completed':
                     break
                 elif run.status == 'requires_action':
-                    self.event_handler.handle_requires_action(run, run.id)
+                    logger.info(f"Run requires action for {work_order_id}")
+                    self.event_handler.handle_requires_action(run, run.id, self.thread.id)
+                elif run.status == 'incomplete':
+                    logger.error(f"Run incomplete for {work_order_id}")
+                    if attempt < max_attempts - 1:
+                        logger.info(f"Recursively retrying work order {work_order_id}")
+                        return await self.process_work_order(work_order, attempt + 1, max_attempts)
+                    else:
+                        return {
+                            'work_order_id': work_order_id,
+                            'status': 'error',
+                            'error': f'Failed after {max_attempts} attempts'
+                        }
                 elif run.status in ['failed', 'cancelled', 'expired']:
+                    logger.error(f"Run failed for {work_order_id} with status: {run.status}")
                     return {
                         'work_order_id': work_order_id,
                         'status': 'error',
                         'error': f'Assistant run failed with status: {run.status}'
                     }
+                
                 await asyncio.sleep(1)
             
             # Get the response
@@ -271,7 +322,8 @@ class WorkOrderMatchingService:
                     'error': 'No response received from assistant'
                 }
 
-            # Save the matches
+            # Save the matches if response is valid
+            
             save_success = await self._save_asset_matches(work_order_id, response_content)
             if save_success:
                 return {
@@ -287,12 +339,20 @@ class WorkOrderMatchingService:
                 }
 
         except Exception as e:
-            self.logger.error(f"Error processing work order {work_order}: {str(e)}")
+            logger.error(f"Error processing work order {work_order_id}: {str(e)}")
             return {
-                'work_order_id': str(work_order.id),
+                'work_order_id': work_order_id,
                 'status': 'error',
                 'error': str(e)
             }
+        finally:
+            # Clean up the current thread
+            try:
+                if self.thread:
+                    self.client.beta.threads.delete(self.thread.id)
+            except Exception as e:
+                logger.warning(f"Failed to delete thread: {str(e)}")
+
     async def _save_asset_matches(self, work_order_id: str, response_content: str) -> bool:
         """Save the asset matches to the database."""
         logger.info(f"Saving matches for work order {work_order_id}")
@@ -345,24 +405,61 @@ class WorkOrderMatchingService:
                         asset_client_id=match['asset_client_id'],
                         matching_confidence_score=float(match['matching_confidence_score']),
                         matching_reasoning=match['matching_reasoning'],
+                        tenant_id=self.tenant_id,
+                        facility_scenario_id=self.scenario_id
                     )
                     self.session.add(new_match)
                 except (KeyError, ValueError) as e:
                     logger.error(f"Invalid match data: {str(e)}")
                     await self.session.rollback()
                     return False
+                
+            # Delete existing corrective actions
+            delete_stmt = text("""
+                DELETE FROM corrective_actions 
+                WHERE work_order_id = :work_order_id
+            """)
+            await self.session.execute(delete_stmt, {'work_order_id': work_order_id})
+                
+            logger.info(f"Inserting {len(response_data.get('work_order', {}).get('corrective_actions', []))} corrective actions")
+            # Insert corrective actions
+            for action in response_data.get('work_order', {}).get('corrective_actions', []):
+                try:
+                    new_corrective_action = CorrectiveAction(
+                        id=str(uuid.uuid4()),
+                    action=action,
+                    tenant_id=self.tenant_id,
+                    facility_scenario_id=self.scenario_id,
+                    work_order_id=work_order_id,
+                    )
+                    self.session.add(new_corrective_action)
+                except (KeyError, ValueError) as e:
+                    logger.error(f"Invalid corrective action data: {str(e)}")
+                    await self.session.rollback()
+                    return False
             
             # Update work order status
             update_stmt = text("""
                 UPDATE work_orders 
-                SET status = :status
+                SET status = :status,
+                    llm_summary = :llm_summary,
+                    llm_downtime_hours = :llm_downtime_hours,
+                    llm_cost = :llm_cost,
+                    task_type = :task_type
                 WHERE id = :work_order_id
             """)
+            logger.info(f"Updating work order {work_order_id} with status {WorkOrderStatus.PENDING_REVIEW.value} and LLM summary {response_data.get('work_order', {}).get('summary')}")
+            logger.info(f"LLM downtime hours: {response_data.get('work_order', {}).get('downtime_hours')}")
+            logger.info(f"LLM cost: {response_data.get('work_order', {}).get('cost')}")
             await self.session.execute(
                 update_stmt,
                 {
                     'status': WorkOrderStatus.PENDING_REVIEW.value,
-                    'work_order_id': work_order_id
+                    'work_order_id': work_order_id,
+                    'llm_summary': response_data.get('work_order', {}).get('summary'),
+                    'llm_downtime_hours': response_data.get('work_order', {}).get('downtime_hours'),
+                    'llm_cost': response_data.get('work_order', {}).get('cost'),
+                    'task_type': response_data.get('work_order', {}).get('task_type')
                 }
             )
             

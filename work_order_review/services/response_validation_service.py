@@ -29,10 +29,14 @@ class ResponseValidationService:
         self.logger = logging.getLogger(__name__)
     
     async def _get_asset_client_ids(self) -> Set[str]:
-        """Fetch and cache asset client IDs."""
+        """Fetch and cache asset client IDs for the current tenant and scenario."""
         if self.asset_client_ids is None:
             try:
-                # Query only active assets with non-null client_ids
+                self.logger.info(
+                    f"Fetching asset client IDs for tenant {self.tenant_id} "
+                    f"and scenario {self.scenario_id}"
+                )
+                # Query only active assets with non-null client_ids for current tenant/scenario
                 stmt = select(Asset.client_id).where(
                     Asset.tenant_id == self.tenant_id,
                     Asset.facility_scenario_id == self.scenario_id,
@@ -51,12 +55,18 @@ class ResponseValidationService:
                 }
                 
                 # Debug logging
-                self.logger.info(f"Found {len(self.asset_client_ids)} unique asset client IDs")
+                self.logger.info(
+                    f"Found {len(self.asset_client_ids)} unique asset client IDs "
+                    f"for tenant {self.tenant_id} and scenario {self.scenario_id}"
+                )
                 if self.asset_client_ids:
                     sample = list(self.asset_client_ids)[:5]
                     self.logger.info(f"Sample asset client IDs: {sample}")
                 else:
-                    self.logger.warning("No asset client IDs found!")
+                    self.logger.warning(
+                        f"No asset client IDs found for tenant {self.tenant_id} "
+                        f"and scenario {self.scenario_id}!"
+                    )
                 
             except Exception as e:
                 self.logger.error(f"Error fetching asset client ids: {e}")
@@ -87,11 +97,16 @@ class ResponseValidationService:
             if not isinstance(matches, list):
                 return ValidationResult(False, "'matches' must be a list")
 
+            match_asset_client_ids = [match.get('asset_client_id') for match in matches]
+            self.logger.info(f"Found {len(match_asset_client_ids)} asset client IDs in matches. {match_asset_client_ids}")
             asset_client_ids = [
                 match.get('asset_client_id') 
                 for match in matches 
                 if 'asset_client_id' in match
             ]
+
+            asset_ids_valid = all(asset_id in self.asset_client_ids for asset_id in asset_client_ids)
+            self.logger.info(f"Asset Client IDs seen as valid by response validation service: {asset_ids_valid}")
             
             if not asset_client_ids:
                 return ValidationResult(False, "No asset client IDs found in matches")

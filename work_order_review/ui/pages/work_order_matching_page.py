@@ -1,260 +1,224 @@
 import streamlit as st
-import pandas as pd
-from typing import Dict, List
+import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy import select, update, func
+import asyncio
+
 from work_order_review.database.config import AsyncSessionLocal
+from work_order_review.database.models import (
+    WorkOrder, 
+    WorkOrderProcessingResult, 
+    WorkOrderStatus
+)
 from work_order_review.services.work_order_matching_service import WorkOrderMatchingService
 from work_order_review.ui.components.layout import render_header
-from work_order_review.database.models import (
-    WorkOrderStatus, 
-    WorkOrder, 
-    WorkOrderMatch,
-    WorkOrderProcessingResult
-)
-from sqlalchemy import select, text, update
-import asyncio
-import uuid
+from work_order_review.ui.components.work_order_table import render_work_order_table
+from work_order_review.ui.components.batch_selector import render_batch_selector
 
 logger = logging.getLogger(__name__)
 
 async def render_work_order_matching():
-    st.title("Match Work Orders")
+    """Main page render function for work order matching."""
+    logger.info("Starting render_work_order_matching")
+    start_time = datetime.now()
     render_header()
     
-    if not all(key in st.session_state for key in ['tenant_id', 'scenario_id']):
-        st.error("Please select a scenario first")
-        return
-        
-    # Store selections in session state
-    if 'selected_work_orders' not in st.session_state:
-        st.session_state.selected_work_orders = set()
-        
+    # Constants
+    page_size = 5000
+    
     async with AsyncSessionLocal() as session:
-        # Get unprocessed work orders first
-        stmt = select(WorkOrder).where(
+        # Get count of unprocessed work orders first
+        logger.info("Querying total work order count")
+        query_start = datetime.now()
+        count_query = select(func.count()).select_from(WorkOrder).where(
             WorkOrder.tenant_id == st.session_state.tenant_id,
             WorkOrder.facility_scenario_id == st.session_state.scenario_id,
             WorkOrder.status == WorkOrderStatus.UNPROCESSED.value
         )
-        result = await session.execute(stmt)
-        work_orders = result.scalars().all()
-        
-        if not work_orders:
-            st.info("No unprocessed work orders found")
-            return
-            
-        # Create dataframe for selection
-        work_order_data = []
-        for wo in work_orders:
-            work_order_data.append({
-                'id': wo.id,
-                'external_id': wo.external_id,
-                'description': wo.raw_data.get('description', 'No description'),
-                'select': wo.id in st.session_state.selected_work_orders
-            })
-            
-        df = pd.DataFrame(work_order_data)
-        
-        # Stats cards at the top
+        result = await session.execute(count_query)
+        total_work_orders = result.scalar()
+        logger.info(f"Found {total_work_orders} total work orders in {(datetime.now() - query_start).total_seconds():.2f}s")
+
+        # Display summary metrics
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Work Orders", len(work_orders))
+            st.metric("Total Work Orders", total_work_orders)
         with col2:
-            st.metric("Selected", len(st.session_state.selected_work_orders))
+            selected_count = st.session_state.get('selected_count', 0)
+            st.metric("Selected", selected_count)
         with col3:
-            st.metric("Remaining", len(work_orders) - len(st.session_state.selected_work_orders))
-        
-        st.divider()
-        
-        
-        # Selection controls in a styled container
-        with st.container():
-            col1, col2, col3 = st.columns([1, 1, 2])
-            
-            with col1:
-                st.write("")  # Add vertical spacing
-                if st.button("📋 Select All", use_container_width=True):
-                    st.session_state.selected_work_orders.update(df['id'].tolist())
-                    st.rerun()
+            st.metric("Remaining", total_work_orders - selected_count)
 
-            with col2:
-                st.write("")  # Add vertical spacing
-                if st.button("🗑️ Clear Selection", use_container_width=True):
-                    st.session_state.selected_work_orders.clear()
-                    st.rerun()
+        # Create tabs for different views
+        tab1, tab2 = st.tabs(["📋 Work Orders", "⚙️ Processing Options"])
+
+        with tab1:
+            # Initialize page state if not exists
+            if 'page' not in st.session_state:
+                st.session_state.page = 1
+                st.session_state.work_orders = None
             
-            with col3:
-                st.write("Batch Size")
-                batch_size = st.number_input(
-                    label="Batch Size",
-                    label_visibility="collapsed",  # Hide the label
-                    min_value=1, 
-                    max_value=len(work_orders),
-                    value=min(10, len(work_orders)), 
-                    step=1,
-                    help="Number of work orders to process at once"
-                )
-                st.write("")  # Add vertical spacing
-                if st.button("➕ Select Batch", type="primary", use_container_width=True):
-                    unselected_ids = [
-                        wo.id for wo in work_orders 
-                        if wo.id not in st.session_state.selected_work_orders
-                    ]
-                    new_selections = unselected_ids[:batch_size]
-                    st.session_state.selected_work_orders.update(new_selections)
-                    st.rerun()
-        
-        # Work orders table with styling
-        st.markdown("""
-        <div style='background-color: #f8f9fa; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;'>
-            <h4 style='color: #495057; margin-top: 0;'>📄 Work Orders</h4>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Enhanced data editor
-        edited_df = st.data_editor(
-            df,
-            key="work_order_table",
-            column_config={
-                "select": st.column_config.CheckboxColumn(
-                    "Process",
-                    help="Select work orders to process",
-                    default=False,
-                ),
-                "description": st.column_config.TextColumn(
-                    "Description",
-                    width="large"
-                ),
-                "external_id": st.column_config.TextColumn(
-                    "Work Order ID",
-                    width="medium"
-                ),
-                "id": st.column_config.TextColumn(
-                    "ID",
-                    width="medium"
-                )
-            },
-            hide_index=True,
-            disabled=["id", "external_id", "description"],
-            use_container_width=True
-        )
-        
-        # Process button with prominence
-        if len(st.session_state.selected_work_orders) > 0:
-            if st.button("🚀 Process Selected Work Orders", type="primary", use_container_width=True):
-                selected_ids = [
-                    row['id'] for _, row in edited_df.iterrows()
-                    if row['select']
-                ]
+            # Only fetch work orders if page changed or not loaded
+            if 'last_page' not in st.session_state or st.session_state.last_page != st.session_state.page:
+                logger.info(f"Fetching work orders for page {st.session_state.page}")
+                offset = (st.session_state.page - 1) * page_size
                 
-                if not selected_ids:
-                    st.warning("Please select at least one work order")
-                    return
+                query_start = datetime.now()
+                query = select(WorkOrder).where(
+                    WorkOrder.tenant_id == st.session_state.tenant_id,
+                    WorkOrder.facility_scenario_id == st.session_state.scenario_id,
+                ).order_by(WorkOrder.created_at.desc()).offset(offset).limit(page_size)
                 
-                # Create a container for progress tracking
-                progress_container = st.empty()
-                with progress_container.container():
-                    st.markdown("### Processing Progress")
-                    progress_bar = st.progress(0.0)
-                    status_text = st.empty()
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        time_remaining = st.empty()
-                    
-                    with col2:
-                        st.markdown("### Statistics")
-                        processed_count = st.empty()
-                        avg_speed = st.empty()
-                    
-                    total = len(selected_ids)
-                    start_time = datetime.now()
-                    
-                    # Process selected work orders
-                    selected_work_orders = [wo for wo in work_orders if wo.id in selected_ids]
-                    
-                    try:
-                        service = await WorkOrderMatchingService(
+                result = await session.execute(query)
+                st.session_state.work_orders = result.scalars().all()
+                st.session_state.last_page = st.session_state.page
+                logger.info(f"Fetched {len(st.session_state.work_orders)} work orders in {(datetime.now() - query_start).total_seconds():.2f}s")
+
+            # Render work order table and get selections
+            st.markdown("### Work Orders")
+            edited_df, table_selected_work_orders = render_work_order_table(st.session_state.work_orders)
+            
+            # Process button and workflow
+            if table_selected_work_orders:
+                logger.info(f"Selected work orders from table: {len(table_selected_work_orders)}")
+                st.divider()
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**Ready to process {len(table_selected_work_orders)} work orders**")
+                with col2:
+                    if st.button(
+                        "🚀 Process Selected", 
+                        type="primary", 
+                        use_container_width=True,
+                        key="process_selected_button"
+                    ):
+                        logger.info("Process button clicked")
+                        progress_text = st.empty()
+                        progress_bar = st.progress(0)
+                        
+                        async def update_progress(current: int, total: int, status: str):
+                            progress = float(current) / float(total) if total > 0 else 0
+                            progress_bar.progress(progress)
+                            progress_text.text(f"Processing {current} of {total} work orders...")
+                        
+                        await process_work_orders(
                             session=session,
-                            tenant_id=st.session_state.tenant_id,
-                            scenario_id=st.session_state.scenario_id
-                        ).initialize()
-
-                        def progress_callback(work_order_id: str, current: int):
-                            progress = current / total
-                            progress_bar.progress(progress, f"Processing {current}/{total}")
-                            status_text.markdown(f"🔄 **Processing work order {current}/{total}**")
-                            
-                            elapsed_time = (datetime.now() - start_time).total_seconds()
-                            if current > 1:
-                                avg_time_per_item = elapsed_time / current
-                                remaining_items = total - current
-                                remaining_seconds = remaining_items * avg_time_per_item
-                                remaining_minutes = int(remaining_seconds // 60)
-                                remaining_seconds = int(remaining_seconds % 60)
-                                
-                                # Update statistics
-                                processed_count.markdown(f"✅ **Processed:** {current}/{total}")
-                                avg_speed.markdown(f"⚡ **Speed:** {avg_time_per_item:.1f}s/item")
-                                time_remaining.markdown(
-                                    f"⏱️ **Est. remaining:** {remaining_minutes}m {remaining_seconds}s"
-                                )
-                        
-                        # Create processing results for tracking
-                        for wo in selected_work_orders:
-                            result = WorkOrderProcessingResult(
-                                id=str(uuid.uuid4()),
-                                work_order_id=wo.id
-                            )
-                            session.add(result)
-                        await session.commit()
-                        
-                        results = await service.process_work_orders(
-                            selected_work_orders,
-                            progress_callback=progress_callback
+                            work_orders=table_selected_work_orders,
+                            callback=update_progress
                         )
                         
-                        # Update processing results
-                        for result in results:
-                            wo_id = result['work_order_id']
-                            stmt = update(WorkOrderProcessingResult).where(
-                                WorkOrderProcessingResult.work_order_id == wo_id
-                            ).values(
-                                error=result.get('error'),
-                                raw_response=result.get('response')
-                            )
-                            await session.execute(stmt)
-                        await session.commit()
-                        
-                        # Clean up resources
-                        await service.cleanup()
-                        
-                        # Show final results
-                        successful = len([r for r in results if r.get('status') == 'success'])
-                        failed = len([r for r in results if r.get('status') == 'error'])
-                        
-                        if successful:
-                            st.success(f"Successfully processed {successful} work orders")
-                        if failed:
-                            st.warning(f"Failed to process {failed} work orders")
-                        
-                        # Show completion time
-                        total_elapsed = (datetime.now() - start_time).total_seconds()
-                        minutes = int(total_elapsed // 60)
-                        seconds = int(total_elapsed % 60)
-                        st.info(f"Total processing time: {minutes}m {seconds}s")
-                        
-                        # Clear the selected work orders from session state
-                        st.session_state.selected_work_orders -= set(selected_ids)
-                        
-                        # Rerun to refresh the page
+                        # Clear selections and refresh work orders
+                        st.session_state.table_selections = {}
+                        st.session_state.work_orders = None  # Force refresh of work orders
+                        st.session_state.last_page = None    # Force refresh of current page
                         st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"An error occurred: {str(e)}")
-                        logger.error(f"Error during processing: {str(e)}", exc_info=True)
+            else:
+                st.info("Select work orders to begin processing")
+
+        with tab2:
+            st.markdown("### Processing Options")
+            auto_process = st.checkbox(
+                "Auto-process next batch",
+                help="Automatically start processing the next batch when current batch completes"
+            )
+            
+            send_notifications = st.checkbox(
+                "Send notifications",
+                help="Send notifications when processing completes"
+            )
+
+        logger.info(f"Total page render time: {(datetime.now() - start_time).total_seconds():.2f}s")
+
+async def process_work_orders(session, work_orders, callback):
+    """Process selected work orders with progress tracking."""
+    logger.info(f"Processing {len(work_orders)} work orders")
+    st.warning("⚠️ **Please do not navigate away from this page.** Processing will stop if you leave.")
+    
+    # Setup progress tracking
+    progress_container = st.empty()
+    status_text = st.empty()
+    timing_text = st.empty()
+    
+    with progress_container:
+        progress_bar = st.progress(0.0)
+        st.markdown("### Processing Work Orders")
+    
+    # Track timing
+    start_time = datetime.now()
+    
+    try:
+        # Create processing results for tracking
+        logger.info("Creating processing result records")
+        for wo in work_orders:
+            result = WorkOrderProcessingResult(
+                id=str(uuid.uuid4()),
+                work_order_id=wo.id
+            )
+            session.add(result)
+        await session.commit()
+        logger.info("Processing result records created")
+        
+        # Initialize service
+        logger.info("Initializing WorkOrderMatchingService")
+        service = await WorkOrderMatchingService(
+            session=session,
+            tenant_id=st.session_state.tenant_id,
+            scenario_id=st.session_state.scenario_id
+        ).initialize()
+        logger.info("Service initialized successfully")
+        
+        # Test service functionality
+        logger.info("Testing service functionality")
+        test_result = service.client.beta.assistants.list(limit=1)
+        logger.info(f"Test API call successful: {bool(test_result)}")
+        
+        # Process work orders
+        logger.info("Starting processing loop")
+        
+        def update_progress(wo_id: str, current: int, status: str):
+            """Synchronous progress callback"""
+            progress = float(current) / len(work_orders)
+            progress_bar.progress(progress)
+            
+            status_text.text(
+                f"Processing work order {current}/{len(work_orders)}\n"
+                f"ID: {wo_id}\nStatus: {status}"
+            )
+            
+            elapsed_time = (datetime.now() - start_time).total_seconds()
+            if current > 0:
+                avg_time_per_item = elapsed_time / current
+                remaining_items = len(work_orders) - current
+                estimated_remaining_time = remaining_items * avg_time_per_item
+                
+                timing_text.text(
+                    f"Average time per work order: {avg_time_per_item:.1f} seconds\n"
+                    f"Estimated time remaining: {timedelta(seconds=int(estimated_remaining_time))}"
+                )
+        
+        results = await service.process_work_orders(
+            work_orders,
+            progress_callback=update_progress  # Now passing a sync function
+        )
+        
+        # Display results
+        successful = len([r for r in results if r.get('status') == 'success'])
+        failed = len([r for r in results if r.get('status') == 'error'])
+        
+        if successful:
+            st.success(f"Successfully processed {successful} work orders")
+        if failed:
+            st.warning(f"Failed to process {failed} work orders")
+    except Exception as e:
+        logger.exception("Error during processing")
+        st.error(f"An error occurred: {str(e)}")
+    finally:
+        # Clear progress displays
+        progress_container.empty()
+        status_text.empty()
+        timing_text.empty()
 
 if __name__ == "__main__":
     import asyncio

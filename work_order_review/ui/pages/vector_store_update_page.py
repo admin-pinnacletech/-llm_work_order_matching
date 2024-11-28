@@ -82,7 +82,7 @@ async def handle_update(tenant_id: str, scenario_id: str, progress_bar, status_t
             status_text.text(f"Processed {current} of {total} assessments")
         
         service = VectorStoreService()
-        success, result = await service.upload_assessments(
+        success, result_data = await service.upload_assessments(
             assessments,
             progress_callback=update_progress
         )
@@ -91,12 +91,13 @@ async def handle_update(tenant_id: str, scenario_id: str, progress_bar, status_t
         if success:
             st.success(
                 f"""Vector store update complete!
-                • Total processed: {result['total_processed']}
-                • Updated: {result['updated']}
-                • Created: {result['created']}"""
+                • Total processed: {result_data['total_processed']}
+                • Created: {result_data['created']}
+                • Updated: {result_data['updated']}
+                • Errors: {result_data['errors']}"""
             )
         else:
-            st.error(f"Vector store update failed: {result.get('message', 'Unknown error')}")
+            st.error(f"Vector store update failed: {result_data['message']}")
             
     except Exception as e:
         logger.error(f"Error updating vector store: {str(e)}", exc_info=True)

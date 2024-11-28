@@ -5,7 +5,7 @@ import logging
 from work_order_review.database.config import AsyncSessionLocal
 from work_order_review.services.work_order_matching_service import WorkOrderMatchingService
 from work_order_review.ui.components.layout import render_header
-from work_order_review.database.models import WorkOrderStatus, WorkOrder, WorkOrderMatch, Asset, Component
+from work_order_review.database.models import WorkOrderStatus, WorkOrder, WorkOrderMatch, Asset, Component, CorrectiveAction
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import func
@@ -63,6 +63,13 @@ async def render_work_order_review():
         
         result = await session.execute(stmt)
         work_orders = result.scalars().all()
+
+        stmt = select(CorrectiveAction).where(
+            CorrectiveAction.tenant_id == st.session_state.tenant_id,
+            CorrectiveAction.facility_scenario_id == st.session_state.scenario_id
+        )
+        result = await session.execute(stmt)
+        corrective_actions = result.scalars().all()
         
         if not work_orders:
             st.info("No work orders pending review")
@@ -76,11 +83,29 @@ async def render_work_order_review():
         
         current_index = st.session_state.current_wo_index
         work_order = work_orders[current_index]
+        corrective_actions = [action for action in corrective_actions if action.work_order_id == work_order.id]
+        
         
         # Progress indicator
         st.progress((current_index + 1) / len(work_orders))
         st.markdown(f"### Work Order {current_index + 1} of {len(work_orders)}")
         st.subheader(f"Work Order: {work_order.external_id}")
+
+        # Navigation buttons
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if current_index > 0:
+                if st.button("← Previous"):
+                    st.session_state.current_wo_index -= 1
+                    st.rerun()
+        
+        with col3:
+            if current_index < len(work_orders) - 1:
+                if st.button("Next →"):
+                    st.session_state.current_wo_index += 1
+                    st.rerun()
+            else:
+                st.success("All work orders reviewed!")
         
         # Create two main columns
         wo_col, matches_col = st.columns([1, 1])
@@ -116,10 +141,25 @@ async def render_work_order_review():
         
         # Matches Column
         with matches_col:
+            st.subheader("Summary")
+            st.text_area("Summary", value=work_order.llm_summary, height=200)
+            st.subheader("Task Type")
+            st.selectbox("Task Type", options=["Reactive Repair", "Preventative Maintenance", "Inspection", "Planned Repair", None], index=["Reactive Repair", "Preventative Maintenance", "Inspection", "Planned Repair", None].index(work_order.task_type))
+            st.subheader("Downtime Hours")
+            st.number_input("Downtime Hours", value=work_order.llm_downtime_hours)
+            st.subheader("Cost")
+            st.number_input("Cost", value=work_order.llm_cost)
+            if corrective_actions:
+                st.subheader("Corrective Actions")
+                st.data_editor(pd.DataFrame([action.action for action in corrective_actions], columns=["Action"]), num_rows="dynamic", use_container_width=True)
+
+
             st.markdown("### Review Matches")
             
-            # Existing Matches Table first
-            if matches := work_order.matches:
+            # Get matches for the current work order only
+            matches = [match for match in work_order.matches if match.work_order_id == work_order.id]
+            
+            if matches:
                 st.markdown("#### Current Matches")
                 
                 review_service = MatchReviewService(session)
@@ -314,13 +354,27 @@ async def render_work_order_review():
                             for match in matches
                         }
                         
+                        # Get the current values from the UI
+                        current_summary = st.session_state.get(f"summary_{work_order.id}", work_order.llm_summary)
+                        current_downtime = st.session_state.get(f"downtime_{work_order.id}", work_order.llm_downtime_hours)
+                        current_cost = st.session_state.get(f"cost_{work_order.id}", work_order.llm_cost)
+                        current_actions = [
+                            action.action for action in corrective_actions
+                        ] if corrective_actions else []
+                        
                         async with AsyncSessionLocal() as review_session:
                             async with review_session.begin():
                                 review_service = MatchReviewService(review_session)
                                 success = await review_service.submit_review(
                                     work_order_id=work_order.id,
                                     match_decisions=match_decisions,
-                                    review_notes=review_notes
+                                    review_notes=review_notes,
+                                    summary=current_summary,
+                                    downtime_hours=current_downtime,
+                                    cost=current_cost,
+                                    corrective_actions=current_actions,
+                                    tenant_id=st.session_state.tenant_id,
+                                    facility_scenario_id=st.session_state.scenario_id
                                 )
                                 
                                 if success:
@@ -338,21 +392,7 @@ async def render_work_order_review():
             if pending_matches > 0:
                 st.warning(f"⚠️ {pending_matches} match{'es' if pending_matches != 1 else ''} still need{'s' if pending_matches == 1 else ''} to be reviewed")
         
-        # Navigation buttons
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col1:
-            if current_index > 0:
-                if st.button("← Previous"):
-                    st.session_state.current_wo_index -= 1
-                    st.rerun()
-        
-        with col3:
-            if current_index < len(work_orders) - 1:
-                if st.button("Next →"):
-                    st.session_state.current_wo_index += 1
-                    st.rerun()
-            else:
-                st.success("All work orders reviewed!")
+       
 
 if __name__ == "__main__":
     asyncio.run(render_work_order_review()) 
